@@ -1,5 +1,7 @@
 import argparse
 import sys
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +26,32 @@ def _direction_label(direction: str) -> str:
     return "[yellow]→NEUTRAL[/yellow]"
 
 
+@dataclass
+class _SourceSummary:
+    name: str
+    article_count: int = 0
+    success: bool = False
+    error: str | None = None
+
+
+def _print_run_summary(summaries: list[_SourceSummary], signal_count: int):
+    table = Table(show_header=True, header_style="bold magenta", show_footer=True, box=None)
+    table.add_column("ソース", footer="シグナル検出数")
+    table.add_column("記事数", justify="right", footer=str(signal_count))
+    table.add_column("ステータス", footer="")
+
+    for s in summaries:
+        if not s.success and s.error:
+            status = "[bold red]FAIL[/bold red]"
+        elif s.article_count == 0:
+            status = "[yellow]記事なし[/yellow]"
+        else:
+            status = "[bold green]成功[/bold green]"
+        table.add_row(s.name, f"{s.article_count}件", status)
+
+    console.print(Panel(table, title="収集完了サマリー", expand=False))
+
+
 def cmd_show(args):
     init_db()
     now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M JST")
@@ -32,7 +60,11 @@ def cmd_show(args):
         expand=False,
     ))
 
-    rows = get_latest_signals(limit=args.limit, ticker=args.ticker)
+    rows = get_latest_signals(
+        limit=args.limit,
+        ticker=args.ticker,
+        source=getattr(args, "source", None),
+    )
 
     if not rows:
         console.print("[yellow]シグナルがありません。まず `run` コマンドで収集・分析を実行してください。[/yellow]")
@@ -80,7 +112,6 @@ def cmd_run(args):
     from agents.collector import collect
     from agents.analyzer import analyze
     from db.models import save_article, save_signal
-    import time
 
     source_name = getattr(args, "source", None)
     sources = load_enabled_sources()
@@ -92,6 +123,7 @@ def cmd_run(args):
 
     db = init_db()
     all_signals = []
+    summaries: list[_SourceSummary] = []
 
     with Progress(
         SpinnerColumn(),
@@ -107,14 +139,19 @@ def cmd_run(args):
             if i > 0:
                 time.sleep(3)
 
+            summary = _SourceSummary(name=source["name"])
             progress.update(source_task, description=f"収集中... [{source['name']}]")
-            result = collect(url=source["url"], source_name=source["name"])
+            result = collect(source)
             progress.advance(source_task)
 
             if not result.success:
+                summary.error = result.error
+                summaries.append(summary)
                 console.print(f"[red]収集失敗: {source['name']} — {result.error}[/red]")
                 continue
 
+            summary.success = True
+            summary.article_count = len(result.articles)
             article_count = len(result.articles)
             analyze_task = progress.add_task(
                 f"分析中... [記事 0/{article_count}]",
@@ -131,6 +168,7 @@ def cmd_run(args):
                 signals.extend(partial)
                 progress.advance(analyze_task)
 
+            lang = source.get("language", "ja")
             with db.conn:
                 for article in result.articles:
                     article_id = save_article(
@@ -139,7 +177,7 @@ def cmd_run(args):
                         url=article.get("url", result.url),
                         title=article.get("title", ""),
                         body=article.get("body", ""),
-                        lang="ja",
+                        lang=lang,
                     )
                     if article_id is None:
                         continue
@@ -156,11 +194,9 @@ def cmd_run(args):
                             )
 
             all_signals.extend(signals)
+            summaries.append(summary)
 
-    if all_signals:
-        console.print(f"[green]{len(all_signals)} 件のシグナルを検出・保存しました。[/green]")
-    else:
-        console.print("[yellow]シグナルは検出されませんでした。[/yellow]")
+    _print_run_summary(summaries, len(all_signals))
 
 
 def cmd_watch_add(args):
@@ -200,6 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     # show
     show_p = sub.add_parser("show", help="最新シグナルを表示")
     show_p.add_argument("--ticker", default=None, help="特定ティッカーで絞り込み")
+    show_p.add_argument("--source", default=None, help="特定ソースで絞り込み")
     show_p.add_argument("--sector", default=None, help="特定セクターで絞り込み（未実装）")
     show_p.add_argument("--limit", type=int, default=10, help="表示件数")
     show_p.add_argument("--detail", action="store_true", help="根拠・記事タイトル・URLをフル表示")

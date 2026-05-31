@@ -76,7 +76,12 @@ def save_signal(db: sqlite_utils.Database, article_id: int, ticker: str, market:
     }, ignore=True)
 
 
-def get_latest_signals(limit: int = 10, ticker: str | None = None, sector: str | None = None):
+def get_latest_signals(
+    limit: int = 10,
+    ticker: str | None = None,
+    sector: str | None = None,
+    source: str | None = None,
+):
     db = get_db()
     query = """
         SELECT s.ticker, s.market, s.direction, s.score, s.reason, s.analyzed_at,
@@ -90,6 +95,10 @@ def get_latest_signals(limit: int = 10, ticker: str | None = None, sector: str |
     if ticker:
         conditions.append("s.ticker = ?")
         params.append(ticker)
+
+    if source:
+        conditions.append("a.source = ?")
+        params.append(source)
 
     if conditions:
         query += " WHERE " + " AND ".join(conditions)

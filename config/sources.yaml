@@ -5,14 +5,33 @@ sources:
     enabled: true
     priority: 1
 
-  - name: Reuters Japan
-    url: https://jp.reuters.com/markets/
+  - name: minkabu
+    url: https://minkabu.jp/news
     language: ja
     enabled: true
     priority: 2
 
-  - name: Bloomberg Japan
-    url: https://www.bloomberg.co.jp/markets
+  - name: Yahoo!ファイナンス
+    url: https://finance.yahoo.co.jp/news/
     language: ja
     enabled: true
     priority: 3
+
+  - name: kabutan
+    url: https://kabutan.jp/news/
+    language: ja
+    enabled: true
+    priority: 4
+
+  - name: Reuters Global
+    url: https://www.reuters.com/markets/
+    language: en
+    enabled: true
+    priority: 5
+
+  - name: Bloomberg Japan
+    url: https://www.bloomberg.co.jp/markets
+    language: ja
+    enabled: false
+    priority: 6
+    note: "robots.txt で自動アクセス禁止のため無効化中"

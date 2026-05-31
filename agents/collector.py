@@ -18,27 +18,43 @@ logger = logging.getLogger(__name__)
 SCREENSHOTS_DIR = Path(__file__).parent.parent / "screenshots"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
-COLLECTOR_SYSTEM_PROMPT = """
+MAX_RETRIES = 2
+RETRY_WAIT = 5
+
+
+def build_collector_prompt(source: dict) -> str:
+    lang_instruction = (
+        "記事タイトルと本文は日本語のまま収集すること。"
+        if source.get("language") == "ja"
+        else "Collect article titles and body text in English as-is."
+    )
+    return f"""
 あなたはニュース収集エージェントです。
-指定されたURLにアクセスし、以下の情報を収集してください：
+指定されたURLにアクセスし、マーケット・株式関連のニュース記事を収集してください。
+
+{lang_instruction}
+
+収集する情報:
 - 記事タイトル
-- 記事本文（要約で可）
+- 記事本文（要約可）
 - 記事URL
 
-ページが動的コンテンツを含む場合はスクロールして追加記事を読み込んでください。
-ペイウォールで本文が読めない場合は、タイトルとリード文のみ収集してください。
-収集した記事は必ずJSON形式で返してください。
+ルール:
+- ページが動的コンテンツを含む場合はスクロールして追加記事を読み込む
+- ペイウォールで本文が読めない場合はタイトルとリード文のみ収集
+- 広告・ナビゲーション・フッターのテキストは除外
+- 最大15件まで収集
 
-返却フォーマット:
-{
+必ずJSON形式のみで返答すること:
+{{
   "articles": [
-    {
+    {{
       "title": "記事タイトル",
       "body": "記事本文または要約",
       "url": "記事のURL"
-    }
+    }}
   ]
-}
+}}
 """
 
 
@@ -67,8 +83,11 @@ def _extract_json(response: anthropic.types.Message) -> dict:
     return {"articles": []}
 
 
-async def _collect_async(url: str) -> anthropic.types.Message:
+async def _collect_once_async(source: dict) -> anthropic.types.Message:
     client = anthropic.AsyncAnthropic()
+    system_prompt = build_collector_prompt(source)
+    url = source["url"]
+
     server_params = StdioServerParameters(
         command="npx",
         args=["-y", "vibium", "mcp", "--screenshot-dir", str(SCREENSHOTS_DIR)],
@@ -84,7 +103,7 @@ async def _collect_async(url: str) -> anthropic.types.Message:
             runner = client.beta.messages.tool_runner(
                 model="claude-sonnet-4-20250514",
                 max_tokens=4096,
-                system=COLLECTOR_SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=[{"role": "user", "content": f"このURLのニュースを収集してください: {url}"}],
                 tools=tools,
             )
@@ -94,22 +113,37 @@ async def _collect_async(url: str) -> anthropic.types.Message:
             return last_message
 
 
-def collect(url: str, source_name: str = "") -> CollectorResult:
-    result = CollectorResult(source=source_name, url=url)
+async def _collect_with_retry_async(source: dict) -> "CollectorResult":
+    result = CollectorResult(source=source["name"], url=source["url"])
 
-    try:
-        logger.info(f"収集開始: {url}")
-        response = asyncio.run(_collect_async(url))
-        if response is None:
-            raise RuntimeError("tool_runner からレスポンスが返りませんでした")
-        data = _extract_json(response)
-        result.articles = data.get("articles", [])
-        result.success = True
-        logger.info(f"収集完了: {len(result.articles)} 件 ({url})")
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            response = await _collect_once_async(source)
+            if response is None:
+                raise RuntimeError("tool_runner からレスポンスが返りませんでした")
 
-    except* Exception as eg:
-        errors = [str(e) for e in eg.exceptions]
-        result.error = "; ".join(errors)
-        logger.error(f"収集失敗 ({url}): {result.error}")
+            data = _extract_json(response)
+            articles = data.get("articles", [])
+
+            if articles:
+                result.articles = articles
+                result.success = True
+                logger.info(f"収集完了: {len(articles)} 件 ({source['url']})")
+                return result
+
+            logger.warning(f"記事0件 attempt={attempt + 1} ({source['url']})")
+
+        except* Exception as eg:
+            errors = [str(e) for e in eg.exceptions]
+            result.error = "; ".join(errors)
+            logger.error(f"収集エラー attempt={attempt + 1} ({source['url']}): {result.error}")
+
+        if attempt < MAX_RETRIES:
+            await asyncio.sleep(RETRY_WAIT)
 
     return result
+
+
+def collect(source: dict) -> CollectorResult:
+    logger.info(f"収集開始: {source['name']} ({source['url']})")
+    return asyncio.run(_collect_with_retry_async(source))

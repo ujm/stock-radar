@@ -24,7 +24,7 @@ def load_enabled_sources() -> list[dict]:
 
 @task(retries=1, retry_delay_seconds=10)
 def collect_from_source(source: dict) -> CollectorResult:
-    return collect(url=source["url"], source_name=source["name"])
+    return collect(source)
 
 
 @task
@@ -91,13 +91,13 @@ def run_once(source_name: str | None = None):
     for i, source in enumerate(sources):
         if i > 0:
             time.sleep(3)
-        result = collect(url=source["url"], source_name=source["name"])
+        result = collect(source)
         if not result.success:
             logger.warning(f"収集失敗: {source['name']} — {result.error}")
             continue
 
         signals = analyze(result.articles)
-        lang = "ja"
+        lang = source.get("language", "ja")
         with db.conn:
             for article in result.articles:
                 article_id = save_article(
