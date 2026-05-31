@@ -1,6 +1,7 @@
 import anthropic
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,17 @@ ANALYZER_SYSTEM_PROMPT = """
 direction は UP / DOWN / NEUTRAL のいずれか。
 score は 0.0〜1.0（1.0が最も影響大）。
 関連銘柄がない場合は signals を空配列で返すこと。
+
+【重要なルール】
+1. 同一銘柄は1記事につき必ず1件のみ返すこと（重複禁止）
+2. market の判定：
+   - 4桁数字コード（例: 7203）→ "JP"
+   - アルファベットコード（例: NVDA, TSM）→ "US"
+   - TSM / TSMC は NYSE上場のため必ず "US"
+3. ネガティブなニュース → direction: "DOWN"
+4. 市況全般・特定銘柄への影響が薄い → direction: "NEUTRAL"
+5. スコアは0.7未満の場合は含めないこと
+6. UPに偏った判断をしないこと。客観的に判断すること
 """
 
 
@@ -57,6 +69,13 @@ class Signal:
     reason: str
     article_url: str = ""
     analyzed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+def normalize_market(ticker: str) -> str:
+    ticker = ticker.strip().upper()
+    if re.fullmatch(r'\d{4}', ticker):
+        return "JP"
+    return "US"
 
 
 def _load_watchlist() -> dict:
@@ -130,7 +149,7 @@ def analyze(articles: list[dict]) -> list[Signal]:
 
                 signals.append(Signal(
                     ticker=ticker,
-                    market=s.get("market", ""),
+                    market=normalize_market(ticker),
                     company=s.get("company", ""),
                     direction=s.get("direction", "NEUTRAL"),
                     score=min(score, 1.0),

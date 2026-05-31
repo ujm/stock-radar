@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TaskProgressColumn
 from rich.table import Table
 
 from db.models import init_db, get_latest_signals
@@ -31,56 +32,135 @@ def cmd_show(args):
         expand=False,
     ))
 
-    rows = get_latest_signals(
-        limit=args.limit,
-        ticker=args.ticker,
-    )
+    rows = get_latest_signals(limit=args.limit, ticker=args.ticker)
 
     if not rows:
         console.print("[yellow]シグナルがありません。まず `run` コマンドで収集・分析を実行してください。[/yellow]")
         return
 
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("ティッカー", style="bold")
-    table.add_column("企業名 / 根拠", max_width=50)
-    table.add_column("方向")
-    table.add_column("スコア", justify="right")
-    table.add_column("ソース")
-    table.add_column("日時")
+    if args.detail:
+        for row in rows:
+            ticker, market, direction, score, reason, analyzed_at, title, source, url = row
+            analyzed_dt = analyzed_at[:16].replace("T", " ") if analyzed_at else ""
+            body_lines = (
+                f"[bold]{ticker}[/bold] ({market})  {_direction_label(direction)}  "
+                f"スコア: [bold]{score:.2f}[/bold]  [{source}]  {analyzed_dt}\n\n"
+                f"[cyan]根拠:[/cyan] {reason}\n\n"
+                f"[cyan]記事:[/cyan] {title}\n"
+                f"[dim]{url}[/dim]"
+            )
+            console.print(Panel(body_lines, expand=False))
+    else:
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("ティッカー", style="bold")
+        table.add_column("根拠", max_width=32)
+        table.add_column("方向")
+        table.add_column("スコア", justify="right")
+        table.add_column("ソース")
+        table.add_column("日時")
 
-    for row in rows:
-        ticker, market, direction, score, reason, analyzed_at, title, source = row
-        analyzed_dt = analyzed_at[:16].replace("T", " ") if analyzed_at else ""
-        table.add_row(
-            f"{ticker} ({market})",
-            reason[:48] + "…" if len(reason) > 48 else reason,
-            _direction_label(direction),
-            f"{score:.2f}",
-            source,
-            analyzed_dt,
-        )
+        for row in rows:
+            ticker, market, direction, score, reason, analyzed_at, title, source, url = row
+            analyzed_dt = analyzed_at[:16].replace("T", " ") if analyzed_at else ""
+            short_reason = reason[:30] + "…" if len(reason) > 30 else reason
+            table.add_row(
+                f"{ticker} ({market})",
+                short_reason,
+                _direction_label(direction),
+                f"{score:.2f}",
+                source,
+                analyzed_dt,
+            )
 
-    console.print(table)
+        console.print(table)
 
 
 def cmd_run(args):
-    from flows.pipeline import run_once
-    source_name = getattr(args, "source", None)
-    label = f"[bold]{source_name}[/bold]" if source_name else "全ソース"
-    console.print(f"[cyan]収集・分析を開始します ({label})...[/cyan]")
+    from flows.pipeline import load_enabled_sources
+    from agents.collector import collect
+    from agents.analyzer import analyze
+    from db.models import save_article, save_signal
+    import time
 
-    try:
-        signals = run_once(source_name=source_name)
-        if signals:
-            console.print(f"[green]{len(signals)} 件のシグナルを検出・保存しました。[/green]")
-        else:
-            console.print("[yellow]シグナルは検出されませんでした。[/yellow]")
-    except ValueError as e:
-        console.print(f"[red]エラー: {e}[/red]")
-        sys.exit(1)
-    except Exception as e:
-        console.print(f"[red]実行エラー: {e}[/red]")
-        sys.exit(1)
+    source_name = getattr(args, "source", None)
+    sources = load_enabled_sources()
+    if source_name:
+        sources = [s for s in sources if s["name"] == source_name]
+        if not sources:
+            console.print(f"[red]エラー: ソースが見つかりません: {source_name}[/red]")
+            sys.exit(1)
+
+    db = init_db()
+    all_signals = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+        transient=False,
+    ) as progress:
+        source_task = progress.add_task("収集中...", total=len(sources))
+
+        for i, source in enumerate(sources):
+            if i > 0:
+                time.sleep(3)
+
+            progress.update(source_task, description=f"収集中... [{source['name']}]")
+            result = collect(url=source["url"], source_name=source["name"])
+            progress.advance(source_task)
+
+            if not result.success:
+                console.print(f"[red]収集失敗: {source['name']} — {result.error}[/red]")
+                continue
+
+            article_count = len(result.articles)
+            analyze_task = progress.add_task(
+                f"分析中... [記事 0/{article_count}]",
+                total=article_count,
+            )
+
+            signals = []
+            for j, article in enumerate(result.articles):
+                progress.update(
+                    analyze_task,
+                    description=f"分析中... [記事 {j + 1}/{article_count}]",
+                )
+                partial = analyze([article])
+                signals.extend(partial)
+                progress.advance(analyze_task)
+
+            with db.conn:
+                for article in result.articles:
+                    article_id = save_article(
+                        db=db,
+                        source=result.source,
+                        url=article.get("url", result.url),
+                        title=article.get("title", ""),
+                        body=article.get("body", ""),
+                        lang="ja",
+                    )
+                    if article_id is None:
+                        continue
+                    for sig in signals:
+                        if sig.article_url == article.get("url", ""):
+                            save_signal(
+                                db=db,
+                                article_id=article_id,
+                                ticker=sig.ticker,
+                                market=sig.market,
+                                direction=sig.direction,
+                                score=sig.score,
+                                reason=sig.reason,
+                            )
+
+            all_signals.extend(signals)
+
+    if all_signals:
+        console.print(f"[green]{len(all_signals)} 件のシグナルを検出・保存しました。[/green]")
+    else:
+        console.print("[yellow]シグナルは検出されませんでした。[/yellow]")
 
 
 def cmd_watch_add(args):
@@ -122,6 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     show_p.add_argument("--ticker", default=None, help="特定ティッカーで絞り込み")
     show_p.add_argument("--sector", default=None, help="特定セクターで絞り込み（未実装）")
     show_p.add_argument("--limit", type=int, default=10, help="表示件数")
+    show_p.add_argument("--detail", action="store_true", help="根拠・記事タイトル・URLをフル表示")
 
     # run
     run_p = sub.add_parser("run", help="今すぐ収集・分析を実行")
