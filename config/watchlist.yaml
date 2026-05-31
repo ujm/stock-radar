@@ -1,0 +1,19 @@
+sectors:
+  - 半導体
+  - エネルギー
+  - 金融
+  - 自動車
+
+tickers:
+  - code: "7203"
+    name: トヨタ自動車
+  - code: "6758"
+    name: ソニーグループ
+  - code: "8306"
+    name: 三菱UFJ
+
+us_tickers:
+  - code: NVDA
+    name: NVIDIA
+  - code: TSM
+    name: TSMC

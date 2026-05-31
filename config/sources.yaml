@@ -1,0 +1,18 @@
+sources:
+  - name: 日経電子版
+    url: https://www.nikkei.com/markets/
+    language: ja
+    enabled: true
+    priority: 1
+
+  - name: Reuters Japan
+    url: https://jp.reuters.com/markets/
+    language: ja
+    enabled: true
+    priority: 2
+
+  - name: Bloomberg Japan
+    url: https://www.bloomberg.co.jp/markets
+    language: ja
+    enabled: true
+    priority: 3
