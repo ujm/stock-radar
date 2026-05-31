@@ -55,6 +55,11 @@ def build_collector_prompt(source: dict) -> str:
     }}
   ]
 }}
+
+【使用禁止ツール】
+- browser_get_attribute は絶対に使用しないこと
+- 要素の属性値が必要な場合は browser_get_text か browser_screenshot を代わりに使うこと
+- browser_evaluate も使用しないこと
 """
 
 
